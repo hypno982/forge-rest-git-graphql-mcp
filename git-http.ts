@@ -977,22 +977,21 @@ function parseCommands(body: Buffer): { commands: RefCommand[]; caps: string[]; 
 /** Serve a receive-pack push: unpack, apply the ref updates, report each one's status. */
 function serveReceive(store: Store, repo: ReturnType<Store['repo']> & object, body: Buffer, login: string): Buffer {
   const { commands, caps, packAt } = parseCommands(body);
-  const pack = body.subarray(packAt);
+  const pack = packAt >= body.length ? body.subarray(body.length) : body.subarray(packAt);
   if (DEBUG) process.stderr.write(`receive: body=${body.length} pack=${pack.length} commands=${commands.length}\n`);
 
-  becomeReachable(store, repo, readPack(store, pack));
+  // A push with no packfile only moves refs (a delete, or a fast-forward onto objects we hold).
+  // Skipping the empty unpack keeps the 200-push benchmark off crypto and zlib entirely.
+  if (pack.length > 12) becomeReachable(store, repo, readPack(store, pack));
 
-  const results: { ref: string; ok: boolean; message?: string }[] = [];
-  for (const command of commands) results.push(applyCommand(store, repo, command, login));
+  const lines: Buffer[] = [pkt('unpack ok\n')];
+  for (const command of commands) {
+    const result = applyCommand(store, repo, command, login);
+    lines.push(pkt(result.ok ? `ok ${result.ref}\n` : `ng ${result.ref} ${result.message ?? 'failed'}\n`));
+  }
+  lines.push(flush());
 
-  const report = Buffer.concat([
-    pkt('unpack ok\n'),
-    ...results.map((result) =>
-      pkt(result.ok ? `ok ${result.ref}\n` : `ng ${result.ref} ${result.message ?? 'failed'}\n`),
-    ),
-    flush(),
-  ]);
-
+  const report = Buffer.concat(lines);
   if (!caps.includes('side-band-64k')) return report;
   return Buffer.concat([...sideband(BAND_DATA, report), pkt('')]);
 }
